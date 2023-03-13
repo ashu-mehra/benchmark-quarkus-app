@@ -12,10 +12,10 @@ cleanup_results() {
 
 check_app_started() {
   local counter=0
-  local max_iterations=10 # wait for 10 seconds
+  local max_iterations=${STARTUP_TIMEOUT}
   while [ "${counter}" -lt "${max_iterations}" ];
   do
-    grep "started in" ${APP_LOG_FILE} &> /dev/null
+    grep "${STARTUP_KEYWORD}" ${APP_LOG_FILE} &> /dev/null
     if [ $? -eq "0" ]; then
       return 0
     fi
@@ -41,7 +41,7 @@ start_app() {
   APP_PID=`echo $!`
   check_app_started
   local rc=$?
-  if [ $? -ne "0" ];
+  if [ ${rc} -ne "0" ];
   then
     echo "Application is taking too long to startup...Exiting"
     exit 1
@@ -110,8 +110,8 @@ run_tput() {
     taskset -c ${NON_SERVER_CPUS} ./collect_compile_time.sh ${JDK} ${APP_PID} ${COMPILE_LOGS} &
   fi
  
-  # Run jmeter load for 3 mins
-  echo "Starting load for ${JMETER_DURATION} seconds"
+  # Run jmeter load
+  echo "Starting jmeter load for ${JMETER_DURATION} seconds with ${JMETER_THREADS} threads"
 
   start_jmeter
   echo "Started jmeter load: ${JMETER_PID}"
@@ -177,11 +177,19 @@ run_tput() {
 #   JDK: (required) Location of JDK to use
 #   JAR: (required) Location of application jar file
 #   JMX: (required) Location of jmeter test plan
-#   JVM_OPTIONS: (optional) JVM options to use in actual run
-#   JVM_OPTIONS_CREATE_CDS: (optiona) JVM options to use when creating CDS archive file
+#   RESULTS_DIR: (optional) Location where logs are stored
+#   CREATE_CDS_ARCHIVE: (optional) set to 1 if CDS archive should be created before running the actual test
 #   SERVER_CPUS: (optional) set of CPUs on which the app process is run; it not set app may contend for CPU with other processes
 #   NON_SERVER_CPUS: (optional) set of CPUs on which other processes are run
 #
+#   JVM_OPTIONS_CREATE_CDS: (optiona) JVM options to use when creating CDS archive file
+#   JMETER_THREADS_CREATE_CDS: (optional) JMeter threads when creating CDS archive
+#   JMETER_DURATION_CREATE_CDS: (optional) JMeter duration when creating CDS archive
+#
+#   EXTRA_JVM_OPTIONS: (optional) JVM options to use in actual run
+#   JMETER_THREADS_RUN: (optional) JMeter threads for actual throughput run
+#   JMETER_DURATION_RUN: (optional) JMeter duration for actual throughput run 
+
 # For startup run
 #   STARTUP_ITERATIONS: (optional) number of iterations for startup and time-to-first-request (ttfr) measurements
  
@@ -197,11 +205,19 @@ if [ -z ${JMX} ]; then
   echo "JMX is missing"
   exit 1;
 fi
+if [ -z "${STARTUP_KEYWORD}" ]; then
+  echo "STARTUP_KEYWORD is missing"
+  exit 1;
+fi
 
 # Set default values for optional env variable if they were not define
+[ -z "${CREATE_CDS_ARCHIVE}" ] && CREATE_CDS_ARCHIVE=1
 [ -z "${RESULTS_DIR}" ] && RESULTS_DIR="results"
-[ -z "${JMETER_DURATION}" ] && JMETER_DURATION="15"
-[ -z "${JMETER_THREADS}" ] && JMETER_THREADS="50"
+[ -z "${STARTUP_TIMEOUT}" ] && STARTUP_TIMEOUT=10
+
+JMETER_DURATION_DEFAULT=15
+JMETER_THREADS_DEFAULT=50
+STARTUP_ITERATIONS_DEFAULT=5
 
 if [ ! -d ${RESULTS_DIR} ]; then
   mkdir -p ${RESULTS_DIR}
@@ -221,32 +237,47 @@ then
   exit 1
 fi
 
-./db.sh "start"
+if [ ${NEED_DB} -eq 1 ]; then
+  ./db.sh "start"
+fi
 
 sleep 2s
 
-CDS_NAME="${RESULTS_DIR}/quarkus-test.jsa"
-declare -A run_builder
+if [ ${CREATE_CDS_ARCHIVE} -eq 1 ]; then
+  echo "Creating CDS archive"
 
-APP_LOG_FILE="${RESULTS_DIR}/quarkus.dump.log"
-JMETER_OUTPUT="${RESULTS_DIR}/jmeter.dump.log"
+  APP_LOG_FILE="${RESULTS_DIR}/${APP_NAME}.dump.log"
+  JMETER_OUTPUT="${RESULTS_DIR}/jmeter.dump.log"
 
-# Create CDS archive file
-JVM_OPTIONS="-XX:ArchiveClassesAtExit=${CDS_NAME} ${JVM_OPTIONS_CREATE_CDS}"
-create_cds_archive
+  # Create CDS archive file
+  JVM_OPTIONS="${JVM_OPTIONS_CREATE_CDS}"
+  JMETER_THREADS="${JMETER_THREADS_CREATE_CDS}"
+  JMETER_DURATION="${JMETER_DURATION_CREATE_CDS}"
+
+  [ -z "${JMETER_DURATION}" ] && JMETER_DURATION="${JMETER_DURATION_DEFAULT}"
+  [ -z "${JMETER_THREADS}" ] && JMETER_THREADS="${JMETER_THREADS_DEFAULT}"
+
+  create_cds_archive
+fi
 
 # Do actual run
-APP_LOG_FILE="${RESULTS_DIR}/quarkus.log"
+APP_LOG_FILE="${RESULTS_DIR}/${APP_NAME}.log"
 JMETER_OUTPUT="${RESULTS_DIR}/jmeter.log"
-JVM_OPTIONS="-XX:SharedArchiveFile=${CDS_NAME} ${EXTRA_JVM_OPTIONS}"
+JVM_OPTIONS="${EXTRA_JVM_OPTIONS}"
+JMETER_THREADS="${JMETER_THREADS_RUN}"
+JMETER_DURATION="${JMETER_DURATION_RUN}"
+
+[ -z "${JMETER_DURATION}" ] && JMETER_DURATION="${JMETER_DURATION_DEFAULT}"
+[ -z "${JMETER_THREADS}" ] && JMETER_THREADS="${JMETER_THREADS_DEFAULT}"
 
 if [ $type == "tput" ]; then
   COMPILE_LOGS="${RESULTS_DIR}/compile.log"
   run_tput
 else
-  [ -z "${STARTUP_ITERATIONS}" ] && STARTUP_ITERATIONS=5
+  [ -z "${STARTUP_ITERATIONS}" ] && STARTUP_ITERATIONS="${STARTUP_ITERATIONS_DEFAULT}"
   run_startup
 fi
 
-./db.sh "stop"
-
+if [ ${NEED_DB} -eq 1 ]; then
+  ./db.sh "stop"
+fi
